@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+
+data/
+*.parquet
+*.csv
+
+logs/
+airflow/logs/
+
+node_modules/
+
+.DS_Store
