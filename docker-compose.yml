@@ -9,9 +9,16 @@ services:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin
       POSTGRES_DB: weather
+    command: postgres -c wal_level=logical -c max_wal_senders=10 -c max_replication_slots=10
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d weather"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   clickhouse:
     image: clickhouse/clickhouse-server:latest
@@ -19,25 +26,38 @@ services:
     environment:
       CLICKHOUSE_USER: admin
       CLICKHOUSE_PASSWORD: admin
-      CLICKHOUSE_DB: weather
+      CLICKHOUSE_DB: lakehouse
     ports:
       - "8123:8123"
-      - "9000:9000"
+      - "9002:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./init_clickhouse.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   zookeeper:
     image: confluentinc/cp-zookeeper:5.5.3
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+    healthcheck:
+      test: ["CMD-SHELL", "echo stat | nc localhost 2181 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   kafka:
     image: confluentinc/cp-enterprise-kafka:5.5.3
     container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
     environment:
@@ -46,6 +66,12 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_JMX_PORT: 9991
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   schema-registry:
     image: confluentinc/cp-schema-registry:5.5.3
@@ -59,13 +85,21 @@ services:
       SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: zookeeper:2181
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://schema-registry:8081
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   debezium:
     image: debezium/connect:1.4
     container_name: debezium
     depends_on:
-      - kafka
-      - postgres
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
     ports:
       - "8083:8083"
     environment:
@@ -77,6 +111,144 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8083/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  spark-master:
+    image: huynz-spark:3.5.1
+    container_name: spark-master
+    build: ./spark
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+    ports:
+      - "7077:7077"
+      - "8090:8080"
+    volumes:
+      - ./spark_jobs:/spark_jobs
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  spark-worker:
+    image: huynz-spark:3.5.1
+    container_name: spark-worker
+    build: ./spark
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+    volumes:
+      - ./spark_jobs:/spark_jobs
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: admin12345
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7
+    container_name: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  taxi-simulator:
+    image: python:3.11-slim
+    container_name: taxi-simulator
+    command: bash -c "pip install psycopg2-binary -q && python -u /spark_jobs/taxi_simulator.py"
+    volumes:
+      - ./spark_jobs:/spark_jobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  weather-simulator:
+    image: python:3.11-slim
+    container_name: weather-simulator
+    command: >
+      bash -c "pip install psycopg2-binary requests && python /spark_jobs/weather_simulator.py"
+    volumes:
+      - ./spark_jobs:/spark_jobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  analytics-api:
+    build: 
+      context: ./serving
+      dockerfile: Dockerfile
+    container_name: analytics-api
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    ports:
+      - "8001:8000" 
+    environment:
+      - ENVIRONMENT=production
+      - API_KEY=huynz-super-secret-key-2026
+      - CH_HOST=clickhouse
+      - CH_PORT=8123
+      - CH_USER=admin
+      - CH_PASSWORD=admin
+      - CH_DB=lakehouse 
+    volumes:
+      - ./serving:/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  analytics-dashboard:
+    build: 
+      context: ./serving
+      dockerfile: Dockerfile
+    container_name: analytics-dashboard
+    command: streamlit run dashboard.py --server.port 8501 --server.address 0.0.0.0
+    depends_on:
+      analytics-api:
+        condition: service_healthy
+    ports:
+      - "8505:8501" 
+    environment:
+      - API_BASE_URL=http://analytics-api:8000/api/v1 
+      - API_KEY=huynz-super-secret-key-2026
+    volumes:
+      - ./serving:/app
+    restart: unless-stopped
 
   airflow:
     image: apache/airflow:2.8.1
@@ -96,9 +268,9 @@ services:
       _AIRFLOW_WWW_USER_LASTNAME: admin
       _AIRFLOW_WWW_USER_EMAIL: admin@example.com
       _AIRFLOW_WWW_USER_ROLE: Admin
-
     volumes:
       - ./dags:/opt/airflow/dags
+      - ./data:/opt/airflow/data
       - ./requirements.txt:/requirements.txt
 
     command: >
@@ -110,3 +282,8 @@ services:
 volumes:
   clickhouse_data:
   postgres_data:
+
+networks:
+  default:
+    name: huynz_net
+    external: false

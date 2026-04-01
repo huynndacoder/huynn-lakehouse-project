@@ -1,0 +1,32 @@
+# /serving/Dockerfile
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Create .streamlit directory for secrets
+RUN mkdir -p /home/appuser/.streamlit
+
+# Cache requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Copy streamlit secrets
+COPY .streamlit/secrets.toml /home/appuser/.streamlit/secrets.toml
+
+# Security: Non-root user
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8000 8501
+
+# Default command (overridden by compose)
+CMD ["python", "-m", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]

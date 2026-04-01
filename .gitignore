@@ -1,16 +1,67 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
 
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment files
 .env
+.env.local
 
+# Data files
 data/
-*.parquet
+*.parquet:
 *.csv
+*.json
+*.log
 
+# Logs
 logs/
 airflow/logs/
+*.log
 
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Node (if used)
 node_modules/
 
-.DS_Store
+# Docker
+.dockerignore
+
+# Build artifacts
+spark/jars/
+spark/**/*.class
+spark/**/target/
+
+# MinIO data
+minio_data/
+
+# Checkpoint directories (Spark)
+checkpoint/
+spark_jobs/__pycache__/
+
+# Airflow
+airflow.db
+*.sqlite
+
+# Temporary files
+tmp/
+temp/
+*.tmp
