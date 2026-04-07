@@ -6,8 +6,10 @@ import requests
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from plotly.subplots import make_subplots
+
+TIMEZONE_OFFSET = timezone(timedelta(hours=7))  # GMT+7
 
 # --- Configuration & Setup ---
 st.set_page_config(
@@ -21,7 +23,7 @@ except (FileNotFoundError, KeyError):
     API_KEY = os.getenv("API_KEY", "demo-api-key-2024")
 
 TIMEOUT_SEC = 60
-CACHE_TTL_SEC = 60  # Increased from 10 to reduce API calls
+CACHE_TTL_SEC = 10  # Cache for 10 seconds for faster updates
 
 
 # --- Helper Functions ---
@@ -30,8 +32,13 @@ def get_api_headers() -> dict:
 
 
 @st.cache_data(ttl=CACHE_TTL_SEC, show_spinner=False)
-def fetch_data(endpoint: str, params: dict = None) -> dict:
+def fetch_data(endpoint: str, params: dict = None, mode: str = None) -> dict:
     url = f"{API_BASE_URL}/{endpoint.lstrip('/')}"
+    # Add mode parameter for API routing if not already in params
+    if params is None:
+        params = {}
+    if mode is not None and "mode" not in params:
+        params["mode"] = mode
     try:
         response = requests.get(
             url, headers=get_api_headers(), params=params, timeout=TIMEOUT_SEC
@@ -44,6 +51,61 @@ def fetch_data(endpoint: str, params: dict = None) -> dict:
             st.error(f"API returned error: {payload.get('message')}")
     except requests.exceptions.RequestException as e:
         st.warning(f"API call failed: {endpoint}")
+    return None
+
+
+def create_mock_data(endpoint: str) -> dict:
+    if endpoint == "dashboard/stats":
+        return {
+            "total_trips_today": 2847,
+            "total_revenue_today": 47832.50,
+            "avg_fare_today": 16.80,
+            "top_zones": [{"zone_name": "JFK", "trips": 450, "revenue": 12500}],
+        }
+    elif endpoint == "analytics/time-series":
+        base = datetime.now()
+        return {
+            "timestamps": [(base - timedelta(hours=i)).isoformat() for i in range(24)][
+                ::-1
+            ],
+            "values": np.random.randint(500, 2000, 24).tolist(),
+        }
+    elif endpoint == "analytics/zones":
+        return [
+            {
+                "zone_name": f"Zone {i}",
+                "pickups": 1000 + i * 100,
+                "revenue": 15000 + i * 500,
+                "avg_fare": 15.0 + i * 0.5,
+                "borough": ["Manhattan", "Brooklyn", "Queens"][i % 3],
+            }
+            for i in range(5)
+        ]
+    elif endpoint == "analytics/weather-impact":
+        return [
+            {
+                "date": "2026-04-01",
+                "hour": f"{h:02d}:00",
+                "weather_condition": "Clear",
+                "temperature": 20.0,
+                "humidity": 60.0,
+                "trips": 1000 + i * 100,
+                "avg_fare": 15.0 + i * 0.5,
+                "avg_distance": 5.0 + i * 0.2,
+            }
+            for i, h in enumerate(range(8, 18))
+        ]
+    elif endpoint == "realtime/activity":
+        return [
+            {
+                "zone_id": i,
+                "zone_name": f"Zone {i}",
+                "pickup_count": 50 + i * 10,
+                "revenue_last_hour": 500 + i * 50,
+                "activity_score": 0.5 + i * 0.05,
+            }
+            for i in range(10)
+        ]
     return None
 
 
@@ -87,7 +149,9 @@ def render_header(data_mode: str):
 
     cols = st.columns(4)
     cols[0].metric("System Status", f"{status_color} Online")
-    cols[1].metric("Last Update", datetime.now().strftime("%H:%M:%S"))
+    cols[1].metric(
+        "Last Update", datetime.now(TIMEZONE_OFFSET).strftime("%H:%M:%S (GMT+7)")
+    )
     cols[2].metric("Data Freshness", latency)
     cols[3].metric("Active Pipelines", "3 / 3")
     st.divider()
@@ -129,22 +193,22 @@ def render_kpi_cards(
 
     cols[0].metric(
         label_trips,
-        f"{trips:,}",
+        f"{trips:,}" if trips is not None else "N/A",
         delta=f"{trip_delta:+,}" if trip_delta is not None else None,
     )
     cols[1].metric(
         label_revenue,
-        f"${revenue:,.2f}",
+        f"${revenue:,.2f}" if revenue is not None else "N/A",
         delta=f"${revenue_delta:+,.2f}" if revenue_delta is not None else None,
     )
     cols[2].metric(
         "Average Fare",
-        f"${avg_fare:.2f}",
+        f"${avg_fare:.2f}" if avg_fare is not None else "N/A",
         delta=f"${avg_fare_delta:+.2f}" if avg_fare_delta is not None else None,
     )
     cols[3].metric(
         "Active Zones",
-        f"{active_zones}",
+        f"{active_zones}" if active_zones is not None else "N/A",
         delta=f"{zones_delta:+d}" if zones_delta is not None else None,
     )
 
@@ -176,7 +240,7 @@ def render_zone_performance(data, boroughs=None):
         st.info("No zone data available.")
         return
 
-    df = pd.DataFrame(data).head(10)
+    df = pd.DataFrame(data).head(5)
 
     if "trips" not in df.columns and "pickups" in df.columns:
         df["trips"] = df["pickups"]
@@ -292,51 +356,54 @@ def render_analytics_section(
                     "Rainy": "#4682B4",
                     "Cold": "#00BFFF",
                     "Hot": "#FF4500",
+                    "No Weather Data": "#808080",
                 }
 
                 st.subheader("📊 Weather Impact Analysis")
 
-                # Aggregate by weather condition for scatter plot
-                weather_summary = (
+                # Convert date and hour to datetime for proper sorting
+                df_w["datetime"] = pd.to_datetime(df_w["date"] + " " + df_w["hour"])
+                df_w = df_w.sort_values("datetime")
+
+                # Scatter plot: each dot = one hour, colored by weather condition
+                fig = px.scatter(
+                    df_w,
+                    x="trips",
+                    y="avg_fare",
+                    color="weather_condition",
+                    color_discrete_map=weather_colors,
+                    hover_data=["date", "hour", "temperature", "avg_distance"],
+                    title="Hourly Trips vs Average Fare by Weather<br><sup>Each dot represents one hour</sup>",
+                    labels={
+                        "trips": "Trips",
+                        "avg_fare": "Average Fare ($)",
+                        "weather_condition": "Weather",
+                        "temperature": "Temp (°C)",
+                        "avg_distance": "Avg Distance (mi)",
+                    },
+                )
+                fig.update_traces(
+                    marker=dict(size=12, opacity=0.8, line=dict(width=1, color="white"))
+                )
+                fig.update_layout(
+                    height=500,
+                    legend=dict(
+                        orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+                    ),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Weather condition distribution
+                st.subheader("📅 Weather Distribution")
+                weather_counts = (
                     df_w.groupby("weather_condition")
-                    .agg(
-                        {
-                            "trips": "sum",
-                            "avg_fare": "mean",
-                            "temperature": "mean",
-                            "avg_distance": "mean",
-                        }
-                    )
+                    .agg({"trips": "sum", "avg_fare": "mean"})
                     .reset_index()
                     .sort_values("trips", ascending=False)
                 )
 
-                # Single scatter plot: X = trips, Y = avg_fare, size = avg_distance, color = weather_condition
-                fig = px.scatter(
-                    weather_summary,
-                    x="trips",
-                    y="avg_fare",
-                    size="avg_distance",
-                    color="weather_condition",
-                    color_discrete_map=weather_colors,
-                    hover_data=["temperature"],
-                    title="Trip Count vs Average Fare by Weather Condition<br><sup>Size represents average trip distance</sup>",
-                    labels={
-                        "trips": "Total Trips",
-                        "avg_fare": "Average Fare ($)",
-                        "avg_distance": "Avg Distance (miles)",
-                        "temperature": "Avg Temperature (°C)",
-                    },
-                )
-                fig.update_layout(height=450)
-                fig.update_traces(
-                    marker=dict(opacity=0.7, line=dict(width=1, color="DarkSlateGrey"))
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Summary cards
                 col1, col2, col3, col4 = st.columns(4)
-                for idx, (_, row) in enumerate(weather_summary.iterrows()):
+                for idx, (_, row) in enumerate(weather_counts.iterrows()):
                     cols = [col1, col2, col3, col4]
                     if idx < 4:
                         icon = {
@@ -345,11 +412,16 @@ def render_analytics_section(
                             "Rainy": "🌧️",
                             "Cold": "❄️",
                             "Hot": "🔥",
+                            "No Weather Data": "❓",
                         }.get(row["weather_condition"], "🌡️")
                         cols[idx].metric(
                             f"{icon} {row['weather_condition']}",
-                            f"{row['trips']:,.0f} trips",
-                            f"${row['avg_fare']:.2f} avg fare",
+                            f"{row['trips']:,.0f} trips"
+                            if row["trips"] is not None
+                            else "N/A",
+                            f"${row['avg_fare']:.2f} avg fare"
+                            if row.get("avg_fare") is not None
+                            else "N/A",
                         )
         else:
             st.info("No weather data available")
@@ -371,7 +443,12 @@ def render_analytics_section(
                 st.plotly_chart(fig, use_container_width=True)
 
                 avg_confidence = df_pred["confidence_score"].mean()
-                st.metric("Average Model Confidence", f"{avg_confidence * 100:.1f}%")
+                st.metric(
+                    "Average Model Confidence",
+                    f"{avg_confidence * 100:.1f}%"
+                    if pd.notna(avg_confidence)
+                    else "N/A",
+                )
         else:
             st.info("No demand prediction data available")
 
@@ -381,11 +458,19 @@ def render_analytics_section(
             if not df_z.empty:
                 borough_label = f" ({', '.join(boroughs)})" if boroughs else " (All)"
                 st.subheader(f"🚕 Zone Analysis{borough_label}")
+
+                # Use avg_fare if available, ensure non-negative for size
+                if "avg_fare" in df_z.columns:
+                    df_z["size_col"] = df_z["avg_fare"].clip(lower=0)
+                    size_col = "size_col"
+                else:
+                    size_col = None
+
                 fig = px.scatter(
                     df_z,
                     x="pickups" if "pickups" in df_z.columns else "trips",
                     y="revenue",
-                    size="avg_fare",
+                    size=size_col,
                     color="borough" if "borough" in df_z.columns else None,
                     hover_name="zone_name",
                     title="Zone Performance (Size = Avg Fare)",
@@ -407,7 +492,11 @@ def render_analytics_section(
                 c1.metric("Active Zones", len(df_rt))
                 c2.metric("Total Pickups", f"{df_rt['pickup_count'].sum():,}")
                 c3.metric("Revenue (1hr)", f"${df_rt['revenue_last_hour'].sum():,.0f}")
-                c4.metric("Avg Activity", f"{df_rt['activity_score'].mean():.1f}")
+                avg_activity = df_rt["activity_score"].mean()
+                c4.metric(
+                    "Avg Activity",
+                    f"{avg_activity:.1f}" if pd.notna(avg_activity) else "N/A",
+                )
         else:
             st.info("No real-time activity data available")
 
@@ -444,7 +533,7 @@ def render_sidebar(data_mode: str) -> dict:
     boroughs = st.sidebar.multiselect(
         "Borough",
         ["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"],
-        default=["Manhattan", "Brooklyn"],
+        default=["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"],
     )
 
     # Debounced fare range slider - only updates on button click
@@ -517,22 +606,26 @@ def main():
             default_end = datetime.now().strftime("%Y-%m-%d")
             date_params = {"start_date": default_start, "end_date": default_end}
 
-        # Zone params include boroughs filter
-        zone_params = {"limit": 5, **date_params}
+        # Zone params include boroughs filter (no limit - show all zones for analysis)
+        zone_params = {**date_params}
         if boroughs:
             zone_params["boroughs"] = ",".join(boroughs)
 
         ts_params = {"metric": "trip_count", "interval": "hour", **date_params}
-        weather_params = date_params.copy()
+        weather_params = {
+            "start_date": date_params.get("start_date"),
+            "end_date": date_params.get("end_date"),
+            "mode": "historical",
+        }
         ts_title = "Trip Volume"
 
     else:
         # Real-time mode: today's data using date range (faster than hours_back with Iceberg)
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(TIMEZONE_OFFSET).strftime("%Y-%m-%d")
         stats_params = {"start_date": today, "end_date": today}
 
-        # Zone params include boroughs filter
-        zone_params = {"limit": 5, "start_date": today, "end_date": today}
+        # Zone params include boroughs filter (no limit - show all zones for analysis)
+        zone_params = {"start_date": today, "end_date": today}
         if boroughs:
             zone_params["boroughs"] = ",".join(boroughs)
 
@@ -542,22 +635,25 @@ def main():
             "start_date": today,
             "end_date": today,
         }
-        weather_params = {"start_date": today, "end_date": today}
+        weather_params = {"start_date": today, "end_date": today, "mode": "realtime"}
         ts_title = "Trip Volume (Today - Real-Time)"
 
     # Fetch Data
+    api_mode = "historical" if data_mode == "Historical" else "realtime"
     stats_data = fetch_data(
-        "dashboard/stats", date_params if data_mode == "Historical" else stats_params
+        "dashboard/stats",
+        date_params if data_mode == "Historical" else stats_params,
+        mode=api_mode,
     )
     if not stats_data:
         st.warning("API Unavailable. Loading Fallback Data.")
         stats_data = create_mock_data("dashboard/stats")
 
-    ts_data = fetch_data("analytics/time-series", ts_params)
+    ts_data = fetch_data("analytics/time-series", ts_params, mode=api_mode)
     if not ts_data:
         ts_data = create_mock_data("analytics/time-series")
 
-    zone_data = fetch_data("analytics/zones", zone_params)
+    zone_data = fetch_data("analytics/zones", zone_params, mode=api_mode)
     if not zone_data:
         zone_data = create_mock_data("analytics/zones")
 
@@ -577,7 +673,9 @@ def main():
             cache_key = f"prev_stats_{prev_start}_{prev_end}"
             if cache_key not in st.session_state:
                 st.session_state[cache_key] = fetch_data(
-                    "dashboard/stats", {"start_date": prev_start, "end_date": prev_end}
+                    "dashboard/stats",
+                    {"start_date": prev_start, "end_date": prev_end},
+                    mode="historical",
                 )
             previous_stats = st.session_state[cache_key]
         except Exception:

@@ -89,6 +89,22 @@ class Settings(BaseSettings):
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
     CACHE_TTL: int = 300  # 5 minutes
 
+    # --- Connection Pool Configuration ---
+    # ClickHouse Pool
+    CH_POOL_SIZE: int = 20  # Base pool size
+    CH_MAX_OVERFLOW: int = 10  # Extra connections during burst
+    CH_POOL_TIMEOUT: int = 30  # Seconds to wait for connection
+    CH_POOL_RECYCLE: int = 3600  # Recycle connections after 1 hour
+    CH_POOL_PRE_PING: bool = True  # Validate connections before use
+
+    # PostgreSQL Pool
+    PG_POOL_MIN: int = 2  # Minimum connections in pool
+    PG_POOL_MAX: int = 20  # Maximum connections in pool
+
+    # Redis Cache
+    REDIS_CACHE_ENABLED: bool = True  # Enable/disable caching
+    REDIS_CACHE_TTL: int = 300  # Default cache TTL (5 minutes)
+
     if HAS_PYDANTIC:
         # Pydantic v2 config
         model_config = SettingsConfigDict(

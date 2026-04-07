@@ -9,7 +9,12 @@ from fastapi.responses import StreamingResponse
 # --- LEGO BRICK IMPORTS (To be built next) ---
 from config import settings
 from models import APIResponse
-from database import DatabaseService, get_db_service
+from database import (
+    DatabaseService,
+    get_db_service,
+    PostgresHistoricalService,
+    get_historical_service,
+)
 
 # --- Setup & Security ---
 logging.basicConfig(
@@ -70,8 +75,40 @@ async def health_check(db: DatabaseService = Depends(get_db_service)):
     )
 
 
+@app.get("/health/pool", tags=["System"])
+async def pool_metrics(
+    db: DatabaseService = Depends(get_db_service),
+    historical: PostgresHistoricalService = Depends(get_historical_service),
+):
+    """
+    Get connection pool metrics for monitoring.
+
+    Returns:
+        - ClickHouse pool: size, checked_in, checked_out, overflow
+        - PostgreSQL pool: min, max connections
+        - Redis cache: enabled status
+    """
+    from cache import get_cache_service
+
+    ch_metrics = db.get_pool_metrics()
+    pg_metrics = historical.get_pool_metrics()
+
+    cache = get_cache_service()
+    cache_status = {
+        "enabled": cache.enabled if cache else False,
+        "connected": cache.health_check() if cache else False,
+    }
+
+    return {
+        "clickhouse_pool": ch_metrics,
+        "postgresql_pool": pg_metrics,
+        "redis_cache": cache_status,
+    }
+
+
 @app.get("/api/v1/dashboard/stats", response_model=APIResponse, tags=["Dashboard"])
 async def get_dashboard_stats(
+    mode: str = Query("realtime", regex="^(realtime|historical)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     hours_back: Optional[int] = Query(
@@ -79,11 +116,17 @@ async def get_dashboard_stats(
     ),
     api_key: str = Depends(verify_api_key),
     db: DatabaseService = Depends(get_db_service),
+    historical: PostgresHistoricalService = Depends(get_historical_service),
 ):
     try:
-        data = db.get_dashboard_stats(
-            start_date=start_date, end_date=end_date, hours_back=hours_back
-        )
+        if mode == "historical":
+            data = historical.get_historical_stats(
+                start_date=start_date, end_date=end_date
+            )
+        else:
+            data = db.get_dashboard_stats(
+                start_date=start_date, end_date=end_date, hours_back=hours_back
+            )
         return APIResponse(success=True, message="Stats retrieved", data=data)
     except Exception as e:
         logger.error(f"Dashboard stats error: {e}")
@@ -107,21 +150,30 @@ async def get_recent_trips(
 
 @app.get("/api/v1/analytics/zones", response_model=APIResponse, tags=["Analytics"])
 async def get_zone_analytics(
+    mode: str = Query("realtime", regex="^(realtime|historical)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     hours_back: Optional[int] = Query(
         None, description="Hours of data (for real-time)"
     ),
-    limit: int = Query(10, ge=1, le=50),
+    limit: Optional[int] = Query(
+        None, ge=1, le=500, description="Max zones to return (default: all)"
+    ),
     boroughs: Optional[str] = Query(None, description="Comma-separated borough names"),
     api_key: str = Depends(verify_api_key),
     db: DatabaseService = Depends(get_db_service),
+    historical: PostgresHistoricalService = Depends(get_historical_service),
 ):
     try:
         borough_list = boroughs.split(",") if boroughs else None
-        data = db.get_zone_performance(
-            start_date, end_date, limit, hours_back, borough_list
-        )
+        if mode == "historical":
+            data = historical.get_historical_zone_performance(
+                start_date, end_date, limit, borough_list
+            )
+        else:
+            data = db.get_zone_performance(
+                start_date, end_date, limit, hours_back, borough_list
+            )
         return APIResponse(success=True, message="Zone analytics retrieved", data=data)
     except Exception as e:
         logger.error(f"Zone analytics error: {e}")
@@ -132,18 +184,24 @@ async def get_zone_analytics(
     "/api/v1/analytics/weather-impact", response_model=APIResponse, tags=["Analytics"]
 )
 async def get_weather_impact(
+    mode: str = Query("realtime", regex="^(realtime|historical)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     hours_back: int = Query(720, ge=1, le=8760, description="Hours of data to analyze"),
     api_key: str = Depends(verify_api_key),
     db: DatabaseService = Depends(get_db_service),
+    historical: PostgresHistoricalService = Depends(get_historical_service),
 ):
     try:
-        data = db.get_weather_impact(
-            start_date=start_date, end_date=end_date, hours_back=hours_back
-        )
+        if mode == "historical":
+            data = historical.get_weather_impact(start_date, end_date)
+        else:
+            data = db.get_weather_impact(
+                start_date=start_date, end_date=end_date, hours_back=hours_back
+            )
         return APIResponse(success=True, message="Weather impact retrieved", data=data)
     except Exception as e:
+        logger.error(f"Weather impact error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
@@ -151,6 +209,7 @@ async def get_weather_impact(
     "/api/v1/analytics/time-series", response_model=APIResponse, tags=["Analytics"]
 )
 async def get_time_series(
+    mode: str = Query("realtime", regex="^(realtime|historical)$"),
     metric: str = Query("trip_count", regex="^(trip_count|revenue|avg_fare)$"),
     interval: str = Query("hour", regex="^(hour|day|week)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
@@ -160,15 +219,24 @@ async def get_time_series(
     ),
     api_key: str = Depends(verify_api_key),
     db: DatabaseService = Depends(get_db_service),
+    historical: PostgresHistoricalService = Depends(get_historical_service),
 ):
     try:
-        data = db.get_time_series(
-            metric,
-            interval,
-            start_date=start_date,
-            end_date=end_date,
-            hours_back=hours_back,
-        )
+        if mode == "historical":
+            data = historical.get_historical_time_series(
+                metric,
+                interval,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        else:
+            data = db.get_time_series(
+                metric,
+                interval,
+                start_date=start_date,
+                end_date=end_date,
+                hours_back=hours_back,
+            )
         return APIResponse(success=True, message=f"Time series for {metric}", data=data)
     except Exception as e:
         raise HTTPException(status_code=500, detail="Internal server error")

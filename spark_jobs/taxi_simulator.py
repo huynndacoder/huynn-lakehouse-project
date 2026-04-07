@@ -4,7 +4,9 @@ import random
 import time
 import signal
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+TIMEZONE_OFFSET = timezone(timedelta(hours=7))  # GMT+7
 
 POSTGRES_CONFIG = {
     "host": "postgres",
@@ -32,7 +34,7 @@ def signal_handler(signum, frame):
 
 
 def generate_trip():
-    pickup = datetime.now()
+    pickup = datetime.now(TIMEZONE_OFFSET).replace(tzinfo=None)
     trip_duration = random.randint(300, 3600)
     dropoff = pickup + timedelta(seconds=trip_duration)
 
@@ -115,7 +117,7 @@ def main():
             insert_trips_batch(conn, trips)
 
             print(
-                f"Inserted {BATCH_SIZE} trips at {datetime.now().strftime('%H:%M:%S')}"
+                f"Inserted {BATCH_SIZE} trips at {datetime.now(TIMEZONE_OFFSET).strftime('%H:%M:%S')} (GMT+7)"
             )
 
             time.sleep(INTERVAL_SECONDS)

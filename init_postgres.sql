@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_taxi_pickup_location_time ON yellow_taxi_trips(pu
 
 CREATE TABLE IF NOT EXISTS nyc_weather_hourly (
     id SERIAL PRIMARY KEY,
-    time TIMESTAMP,
+    time TIMESTAMP UNIQUE,
     temperature REAL,
     precipitation REAL,
     humidity REAL,

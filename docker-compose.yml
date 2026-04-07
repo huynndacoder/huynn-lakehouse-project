@@ -20,9 +20,25 @@ services:
       retries: 5
       start_period: 10s
 
+  minio-init:
+    image: minio/mc
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      bash -c "
+      mc alias set local http://minio:9000 admin admin12345 &&
+      mc mb local/datalake --ignore-existing &&
+      echo 'Bucket datalake created'
+      "
+
   clickhouse:
     image: clickhouse/clickhouse-server:latest
     container_name: clickhouse
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
     environment:
       CLICKHOUSE_USER: admin
       CLICKHOUSE_PASSWORD: admin
@@ -164,7 +180,7 @@ services:
     volumes:
       - ./minio_data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -196,7 +212,7 @@ services:
     image: python:3.11-slim
     container_name: weather-simulator
     command: >
-      bash -c "pip install psycopg2-binary requests && python /spark_jobs/weather_simulator.py"
+      bash -c "pip install -q psycopg2-binary requests && python -u /spark_jobs/weather_simulator.py"
     volumes:
       - ./spark_jobs:/spark_jobs
     depends_on:
@@ -212,16 +228,41 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8001:8000" 
     environment:
-      - ENVIRONMENT=production
-      - API_KEY=huynz-super-secret-key-2026
-      - CH_HOST=clickhouse
-      - CH_PORT=8123
-      - CH_USER=admin
-      - CH_PASSWORD=admin
-      - CH_DB=lakehouse 
+      ENVIRONMENT: production
+      API_KEY: huynz-super-secret-key-2026
+      CH_HOST: clickhouse
+      CH_PORT: 8123
+      CH_USER: admin
+      CH_PASSWORD: admin
+      CH_DB: lakehouse
+      CH_POOL_SIZE: 20
+      CH_MAX_OVERFLOW: 10
+      CH_POOL_TIMEOUT: 30
+      CH_POOL_RECYCLE: 3600
+      CH_POOL_PRE_PING: "true"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: weather
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      PG_POOL_MIN: 2
+      PG_POOL_MAX: 20
+      REDIS_URL: redis://redis:6379
+      REDIS_CACHE_ENABLED: "true"
+      REDIS_CACHE_TTL: 300
+    command: >
+      python -m uvicorn api:app
+      --host 0.0.0.0
+      --port 8000
+      --workers 4
+      --timeout-keep-alive 30
     volumes:
       - ./serving:/app
     restart: unless-stopped
@@ -244,8 +285,8 @@ services:
     ports:
       - "8505:8501" 
     environment:
-      - API_BASE_URL=http://analytics-api:8000/api/v1 
-      - API_KEY=huynz-super-secret-key-2026
+      API_BASE_URL: http://analytics-api:8000/api/v1 
+      API_KEY: huynz-super-secret-key-2026
     volumes:
       - ./serving:/app
     restart: unless-stopped
@@ -261,7 +302,6 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-
       _AIRFLOW_WWW_USER_USERNAME: admin
       _AIRFLOW_WWW_USER_PASSWORD: admin
       _AIRFLOW_WWW_USER_FIRSTNAME: admin
@@ -272,7 +312,6 @@ services:
       - ./dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
       - ./requirements.txt:/requirements.txt
-
     command: >
       bash -c "
       pip install -r /requirements.txt &&

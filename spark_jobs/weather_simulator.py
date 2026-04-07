@@ -3,7 +3,9 @@ import psycopg2
 import time
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+TIMEZONE_OFFSET = timezone(timedelta(hours=7))  # GMT+7
 
 OPEN_METEO_API = "https://api.open-meteo.com/v1/forecast"
 POSTGRES_CONFIG = {
@@ -33,7 +35,7 @@ def fetch_weather():
         "longitude": -74.0060,
         "hourly": "temperature_2m,precipitation,relative_humidity_2m,windspeed_10m",
         "forecast_days": 7,
-        "timezone": "America/New_York",
+        "timezone": "Asia/Bangkok",  # GMT+7 for NYC local time equivalent
     }
 
     response = requests.get(OPEN_METEO_API, params=params, timeout=REQUEST_TIMEOUT)
@@ -63,6 +65,11 @@ def insert_weather(conn, weather):
             INSERT INTO public.nyc_weather_hourly 
             (time, temperature, precipitation, humidity, windspeed)
             VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (time) DO UPDATE SET
+                temperature = EXCLUDED.temperature,
+                precipitation = EXCLUDED.precipitation,
+                humidity = EXCLUDED.humidity,
+                windspeed = EXCLUDED.windspeed
         """,
             weather,
         )
@@ -102,7 +109,7 @@ def main():
             insert_weather(conn, weather)
 
             print(
-                f"Weather updated: {weather[1]}C, {weather[2]}mm rain at {weather[0]}"
+                f"Weather updated: {weather[1]}C, {weather[2]}mm rain at {weather[0]} (GMT+7: {datetime.now(TIMEZONE_OFFSET).strftime('%H:%M:%S')})"
             )
 
             time.sleep(INTERVAL_SECONDS)
