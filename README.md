@@ -77,9 +77,11 @@ A production-ready, dual-path analytics pipeline for real-time NYC Taxi data wit
 - Complex aggregations with zone/borough joins
 - 1-3 second query times for large aggregations
 
-**Batch Path (Iceberg - Optional):**
-- Spark writes to Iceberg for long-term archival
-- Used for ML feature engineering and complex batch processing
+**Batch Path (Iceberg - ML Workloads):**
+- Spark writes to Iceberg usingmedallion architecture (Bronze/Silver/Gold)
+- Bronze: Raw CDC data from Kafka
+- Silver: Quality-checked data (fare >= 0, distance >= 0, timestamps valid)
+- Gold: Pre-computed aggregations for ML feature engineering
 - Independent of real-time ClickHouse path
 
 ## Dashboard Modes
@@ -265,7 +267,7 @@ docker exec airflow airflow dags trigger taxi_parquet_to_postgres
 | Service | Auto-Initialization | Description |
 |---------|-------------------|-------------|
 | PostgreSQL | ✅ `init_postgres.sql` | Creates tables, indexes, schema |
-| ClickHouse | ✅ `init_clickhouse.sql` | Creates Bronze/Silver/Gold tables |
+| ClickHouse | ✅ `init_clickhouse.sql` | Creates real-time tables (taxi_prod, nyc_weather, zones) |
 | MinIO | ✅ Init container | Creates `datalake` bucket |
 | Taxi Simulator | ✅ Starts automatically | Generates 100 trips every 30s |
 | Weather Simulator | ✅ Starts automatically | Fetches weather hourly |
@@ -373,8 +375,10 @@ The `huynn.sh` script provides comprehensive pipeline management:
 
 1. **Same CDC** → Kafka topics
 2. **Spark Streaming** → Writes to Iceberg (MinIO)
-3. **Bronze/Silver/Gold** → Medallion architecture
+3. **Medallion Architecture** → Bronze/Silver/Gold layers for ML feature engineering
 4. **Long-term storage** for ML and batch analytics
+
+**Note:** ClickHouse uses a simplified single-table architecture for real-time queries (no medallion needed). Iceberg maintains Bronze/Silver/Gold for batch ML workloads.
 
 ### Historical Flow
 
@@ -683,7 +687,7 @@ Huynz/
 ### Resource Allocation
 
 - **Spark Resources**: 4 cores, 2GB per executor
-- **Streaming Triggers**: 
+- **Streaming Triggers (Iceberg medallion layers)**: 
   - Bronze/Silver: 30 seconds
   - Gold: 300 seconds
 - **Connection Pools**:

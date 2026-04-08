@@ -187,7 +187,7 @@ services:
       start_period: 10s
 
   redis:
-    image: redis:7
+    image: redis:7-alpine
     container_name: redis
     ports:
       - "6379:6379"
@@ -196,6 +196,24 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+
+  trino:
+    image: trinodb/trino:435
+    container_name: trino
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "8085:8080"
+    volumes:
+      - ./trino/etc:/etc/trino
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/info || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   taxi-simulator:
     image: python:3.11-slim
