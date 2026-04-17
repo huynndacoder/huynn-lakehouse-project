@@ -21,8 +21,6 @@ sc._jsc.hadoopConfiguration().set("fs.s3a.path.style.access", "true")
 
 spark = (
     SparkSession.builder.appName("WeatherCDCToIceberg")
-    .config("spark.cores.max", "4")
-    .config("spark.executor.cores", "2")
     .config("spark.default.parallelism", "8")
     .config(
         "spark.sql.extensions",
@@ -31,19 +29,24 @@ spark = (
     .config("spark.sql.catalog.lakehouse", "org.apache.iceberg.spark.SparkCatalog")
     .config("spark.sql.catalog.lakehouse.type", "hadoop")
     .config("spark.sql.catalog.lakehouse.warehouse", "s3a://datalake/warehouse")
+    .config("spark.hadoop.fs.s3a.endpoint", "http://minio:9000")
+    .config("spark.hadoop.fs.s3a.access.key", "admin")
+    .config("spark.hadoop.fs.s3a.secret.key", "admin12345")
+    .config("spark.hadoop.fs.s3a.path.style.access", "true")
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     .config(
         "spark.driver.extraClassPath",
         "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
     )
     .config(
         "spark.executor.extraClassPath",
-        "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
+        "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar:/opt/spark/jars/postgresql-42.7.1.jar",
     )
     .getOrCreate()
 )
 
 spark.sql("""
-    CREATE TABLE IF NOT EXISTS lakehouse.nyc_weather (
+    CREATE TABLE IF NOT EXISTS lakehouse.lakehouse.nyc_weather (
         time TIMESTAMP,
         temperature FLOAT,
         precipitation FLOAT,
@@ -62,7 +65,7 @@ spark.sql("""
 """)
 
 spark.sql("""
-    CREATE TABLE IF NOT EXISTS lakehouse.nyc_weather_deletes (
+    CREATE TABLE IF NOT EXISTS lakehouse.lakehouse.nyc_weather_deletes (
         time TIMESTAMP,
         _deleted_at TIMESTAMP
     )
@@ -207,8 +210,12 @@ def write_weather_to_iceberg(micro_batch_df, batch_id):
             "precipitation",
             "humidity",
             "windspeed",
+            "_processing_time",
+            "_operation"
         )
-        inserts_df.writeTo("lakehouse.nyc_weather").overwritePartitions()
+        
+        # append() instead of overwritePartitions() for unpartitioned tables
+        inserts_df.writeTo("lakehouse.lakehouse.nyc_weather").append()
         logger.info(
             f"Batch {batch_id}: Wrote {inserts_df.count()} inserts/updates to nyc_weather"
         )
@@ -218,22 +225,20 @@ def write_weather_to_iceberg(micro_batch_df, batch_id):
         deletes_df = deletes_batch.select("time", "_deleted_at")
         deletes_df.createOrReplaceTempView("weather_deletes_batch")
         spark.sql("""
-            MERGE INTO lakehouse.nyc_weather t
+            MERGE INTO lakehouse.lakehouse.nyc_weather t
             USING weather_deletes_batch s
             ON t.time = s.time
-            WHEN DELETE THEN DELETE
+            WHEN MATCHED THEN DELETE
         """)
         logger.info(f"Batch {batch_id}: Processed {delete_count} weather deletes")
-
 
 checkpoint_primary = "s3a://datalake/checkpoints/weather_v4"
 checkpoint_backup = "s3a://datalake/checkpoints/weather_v4_backup"
 
 query = (
-    quality_checked.writeStream.format("iceberg")
-    .outputMode("append")
+    quality_checked.writeStream.outputMode("append")
     .option("checkpointLocation", checkpoint_primary)
-    .trigger(processingTime="60 seconds")
+    .trigger(processingTime="30 seconds")
     .foreachBatch(write_weather_to_iceberg)
     .start()
 )

@@ -16,11 +16,6 @@ from pyspark import SparkContext
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-CLICKHOUSE_URL = "http://clickhouse:8123"
-CLICKHOUSE_USER = "admin"
-CLICKHOUSE_PASSWORD = "admin"
-CLICKHOUSE_DB = "lakehouse"
-
 sc = SparkContext.getOrCreate()
 sc.setSystemProperty("com.amazonaws.services.s3.enableV4", "true")
 sc._jsc.hadoopConfiguration().set(
@@ -33,8 +28,6 @@ sc._jsc.hadoopConfiguration().set("fs.s3a.path.style.access", "true")
 
 spark = (
     SparkSession.builder.appName("TaxiCDCToIceberg")
-    .config("spark.cores.max", "4")
-    .config("spark.executor.cores", "2")
     .config("spark.default.parallelism", "8")
     .config(
         "spark.sql.extensions",
@@ -47,19 +40,20 @@ spark = (
     .config("spark.hadoop.fs.s3a.access.key", "admin")
     .config("spark.hadoop.fs.s3a.secret.key", "admin12345")
     .config("spark.hadoop.fs.s3a.path.style.access", "true")
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
     .config(
         "spark.driver.extraClassPath",
-        "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
+        "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar:/opt/spark/jars/postgresql-42.7.1.jar",
     )
     .config(
         "spark.executor.extraClassPath",
-        "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar",
+        "/opt/spark/jars/hadoop-aws-3.3.4.jar:/opt/spark/jars/aws-java-sdk-bundle-1.12.262.jar:/opt/spark/jars/postgresql-42.7.1.jar",
     )
     .getOrCreate()
 )
 
 spark.sql("""
-    CREATE TABLE IF NOT EXISTS lakehouse.taxi_prod (
+    CREATE TABLE IF NOT EXISTS lakehouse.lakehouse.taxi_prod (
         vendorid INTEGER,
         tpep_pickup_datetime TIMESTAMP,
         tpep_dropoff_datetime TIMESTAMP,
@@ -88,7 +82,7 @@ spark.sql("""
 """)
 
 spark.sql("""
-    CREATE TABLE IF NOT EXISTS lakehouse.taxi_prod_deletes (
+    CREATE TABLE IF NOT EXISTS lakehouse.lakehouse.taxi_prod_deletes (
         vendorid INTEGER,
         tpep_pickup_datetime TIMESTAMP,
         tpep_dropoff_datetime TIMESTAMP,
@@ -99,7 +93,7 @@ spark.sql("""
 """)
 
 spark.sql("""
-    CREATE TABLE IF NOT EXISTS lakehouse.silver_taxi_trips (
+    CREATE TABLE IF NOT EXISTS lakehouse.lakehouse.silver_taxi_trips (
         vendorid INTEGER,
         tpep_pickup_datetime TIMESTAMP,
         tpep_dropoff_datetime TIMESTAMP,
@@ -281,47 +275,8 @@ deletes = raw_ops.filter(col("op") == "d").select(
 )
 
 
-def write_to_clickhouse(df, table_name, batch_id):
-    """
-    Write DataFrame to ClickHouse using HTTP API
-    """
-    try:
-        # Convert to Pandas for easier CSV generation
-        pdf = df.toPandas()
-
-        if pdf.empty:
-            logger.info(
-                f"Batch {batch_id}: No data to write to ClickHouse {table_name}"
-            )
-            return
-
-        # Generate CSV format
-        csv_data = pdf.to_csv(index=False, header=False)
-
-        # Insert query
-        query = f"INSERT INTO {CLICKHOUSE_DB}.{table_name} FORMAT CSV"
-
-        # HTTP POST to ClickHouse
-        response = requests.post(
-            f"{CLICKHOUSE_URL}/?user={CLICKHOUSE_USER}&password={CLICKHOUSE_PASSWORD}&query={query}",
-            data=csv_data.encode("utf-8"),
-            timeout=30,
-        )
-
-        if response.status_code == 200:
-            logger.info(
-                f"Batch {batch_id}: Wrote {len(pdf)} records to ClickHouse {table_name}"
-            )
-        else:
-            logger.error(f"Batch {batch_id}: ClickHouse write failed: {response.text}")
-    except Exception as e:
-        logger.error(
-            f"Batch {batch_id}: Failed to write to ClickHouse {table_name}: {str(e)}"
-        )
-
-
 def write_to_iceberg(micro_batch_df, batch_id):
-    if micro_batch_df.rdd.isEmpty():
+    if micro_batch_df.isEmpty():
         logger.info(f"Batch {batch_id} is empty, skipping")
         return
 
@@ -342,14 +297,11 @@ def write_to_iceberg(micro_batch_df, batch_id):
             inserts_deduped.cache()
 
             # Write to Iceberg (historical storage)
-            inserts_deduped.writeTo("lakehouse.taxi_prod").append()
+            inserts_deduped.writeTo("lakehouse.lakehouse.taxi_prod").append()
             logger.info(f"Batch {batch_id}: Wrote to Iceberg taxi_prod")
 
-            inserts_deduped.writeTo("lakehouse.silver_taxi_trips").append()
+            inserts_deduped.writeTo("lakehouse.lakehouse.silver_taxi_trips").append()
             logger.info(f"Batch {batch_id}: Wrote to Iceberg silver_taxi_trips")
-
-            # Write to ClickHouse (real-time queries)
-            write_to_clickhouse(inserts_deduped, "silver_taxi_trips", batch_id)
 
             inserts_deduped.unpersist()
     else:
@@ -362,7 +314,7 @@ def write_to_iceberg(micro_batch_df, batch_id):
         )
         deletes_df.createOrReplaceTempView("deletes_batch")
         spark.sql("""
-            MERGE INTO lakehouse.taxi_prod t
+            MERGE INTO lakehouse.lakehouse.taxi_prod t
             USING deletes_batch s
             ON t.vendorid = s.vendorid 
             AND t.tpep_pickup_datetime = s.tpep_pickup_datetime
@@ -376,8 +328,7 @@ checkpoint_primary = "s3a://datalake/checkpoints/taxi_prod_cdc_stream"
 checkpoint_backup = "s3a://datalake/checkpoints/taxi_prod_cdc_stream_backup"
 
 query = (
-    quality_checked.writeStream.format("iceberg")
-    .outputMode("append")
+    quality_checked.writeStream.outputMode("append")
     .option("checkpointLocation", checkpoint_primary)
     .trigger(processingTime="30 seconds")
     .foreachBatch(write_to_iceberg)

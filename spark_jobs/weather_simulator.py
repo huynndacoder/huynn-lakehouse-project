@@ -35,7 +35,7 @@ def fetch_weather():
         "longitude": -74.0060,
         "hourly": "temperature_2m,precipitation,relative_humidity_2m,windspeed_10m",
         "forecast_days": 7,
-        "timezone": "Asia/Bangkok",  # GMT+7 for NYC local time equivalent
+        "timezone": "Asia/Bangkok",  # GMT+7 
     }
 
     response = requests.get(OPEN_METEO_API, params=params, timeout=REQUEST_TIMEOUT)

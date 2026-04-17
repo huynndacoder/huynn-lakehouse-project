@@ -12,7 +12,7 @@
 
     "database.server.name": "postgres",
 
-    "table.include.list": "public.yellow_taxi_trips,public.nyc_weather_hourly",
+    "table.include.list": "public.yellow_taxi_trips,public.nyc_weather_hourly,public.taxi_zones",
 
     "topic.prefix": "postgres",
 

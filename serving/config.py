@@ -4,8 +4,7 @@ from typing import List
 
 logger = logging.getLogger(__name__)
 
-# --- Graceful Pydantic Fallback ---
-# Tries pydantic_settings (v2), then pydantic (v1), then a raw fallback class
+# --- Pydantic Fallback ---
 try:
     from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -15,7 +14,7 @@ except ImportError:
         from pydantic import BaseSettings
 
         HAS_PYDANTIC = True
-        SettingsConfigDict = dict  # Dummy for v1 compatibility
+        SettingsConfigDict = dict  
     except ImportError:
         HAS_PYDANTIC = False
         logger.warning(
@@ -37,7 +36,6 @@ class Settings(BaseSettings):
     """
     Global application settings.
     Default values are provided for local development.
-    In production, these MUST be overridden using a .env file or environment variables.
     """
 
     # --- API Category ---
@@ -47,49 +45,47 @@ class Settings(BaseSettings):
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
     ENVIRONMENT: str = "development"
-    CORS_ORIGINS: List[str] = ["*"]  # Harden in production!
+    CORS_ORIGINS: List[str] = ["*"]  # Harden in production
 
-    # --- Auth Category ---
-    # RISK: HIGH - Override this via environment variable in production!
+    # Auth Category
+    #Override this via environment variable in production
     API_KEY: str = (
         "huynz-super-secret-key-2026"  # Default; override via API_KEY env var
     )
     API_KEY_NAME: str = "X-API-Key"
 
-    # --- PostgreSQL (OLTP) ---
+    # PostgreSQL (OLTP) 
     PG_HOST: str = "localhost"
     PG_PORT: int = 5432
     PG_DB: str = "taxi_db"
     PG_USER: str = "admin"
     PG_PASSWORD: str = "admin"
 
-    # --- Airflow DB ---
+    # Airflow DB 
     AIRFLOW_DB_HOST: str = "localhost"
     AIRFLOW_DB_PORT: int = 5433
     AIRFLOW_DB_NAME: str = "airflow"
     AIRFLOW_DB_USER: str = "airflow"
     AIRFLOW_DB_PASSWORD: str = "airflow"
 
-    # --- ClickHouse (OLAP - Added for the Lakehouse connection) ---
+    # ClickHouse
     CH_HOST: str = "localhost"
-    CH_PORT: int = 8123  # HTTP API port (not 9000 which is native TCP)
+    CH_PORT: int = 8123  # HTTP API port
     CH_USER: str = "admin"
     CH_PASSWORD: str = "admin"
     CH_DB: str = "lakehouse"
 
-    # --- MinIO (Data Lake) ---
+    # MinIO (Data Lake)
     MINIO_ENDPOINT: str = "localhost:9000"
     MINIO_ACCESS_KEY: str = "admin"
     MINIO_SECRET_KEY: str = "admin12345"
     MINIO_BUCKET: str = "lakehouse"
-    MINIO_SECURE: bool = False  # MEDIUM RISK: Set to True in production
+    MINIO_SECURE: bool = False  # Set to True in production
 
-    # --- Redis & Kafka & Cache ---
-    REDIS_URL: str = "redis://localhost:6379"
+    # Kafka
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
-    CACHE_TTL: int = 300  # 5 minutes
 
-    # --- Connection Pool Configuration ---
+    # Connection Pool Configuration
     # ClickHouse Pool
     CH_POOL_SIZE: int = 20  # Base pool size
     CH_MAX_OVERFLOW: int = 10  # Extra connections during burst
@@ -101,17 +97,13 @@ class Settings(BaseSettings):
     PG_POOL_MIN: int = 2  # Minimum connections in pool
     PG_POOL_MAX: int = 20  # Maximum connections in pool
 
-    # Redis Cache
-    REDIS_CACHE_ENABLED: bool = True  # Enable/disable caching
-    REDIS_CACHE_TTL: int = 300  # Default cache TTL (5 minutes)
-
     if HAS_PYDANTIC:
-        # Pydantic v2 config
+        # Pydantic config
         model_config = SettingsConfigDict(
             env_file=".env", env_file_encoding="utf-8", extra="ignore"
         )
 
-    # --- Derived URLs ---
+    # Derived URLs
     @property
     def database_url(self) -> str:
         """Constructs the SQLAlchemy URL for the main PostgreSQL database."""

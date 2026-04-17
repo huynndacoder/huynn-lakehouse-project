@@ -44,3 +44,12 @@ CREATE TABLE IF NOT EXISTS nyc_weather_hourly (
 );
 
 CREATE INDEX IF NOT EXISTS idx_weather_time ON nyc_weather_hourly(time);
+
+CREATE TABLE IF NOT EXISTS taxi_zones (
+    "LocationID" INTEGER PRIMARY KEY,
+    "Borough" TEXT,
+    "Zone" TEXT,
+    "service_zone" TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_taxi_zones_borough ON taxi_zones("Borough");

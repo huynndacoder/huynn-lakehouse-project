@@ -8,7 +8,6 @@ import os
 import threading
 
 from config import settings
-from cache import get_cache_service, cached
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,7 @@ def _format_end_date(end_date: str) -> str:
 
 
 class DatabaseService:
-    """ClickHouse database service with connection pooling and caching."""
+    """ClickHouse database service with connection pooling."""
 
     def __init__(self):
         try:
@@ -57,10 +56,9 @@ class DatabaseService:
                 pool_pre_ping=settings.CH_POOL_PRE_PING,
                 pool_use_lifo=True,  # Reuse most recent connections
             )
-            self.cache = get_cache_service()
             logger.info(
                 f"DatabaseService initialized (pool_size={settings.CH_POOL_SIZE}, "
-                f"max_overflow={settings.CH_MAX_OVERFLOW}, cache={'enabled' if self.cache and self.cache.enabled else 'disabled'})"
+                f"max_overflow={settings.CH_MAX_OVERFLOW})"
             )
         except Exception as e:
             logger.error(f"Failed to initialize DatabaseService: {e}")
@@ -84,13 +82,6 @@ class DatabaseService:
             "checked_out_connections": pool.checkedout(),
             "overflow_connections": pool.overflow(),
         }
-
-    def invalidate_cache(self, pattern: str = None):
-        """Invalidate cached results for a pattern."""
-        if not self.cache:
-            return
-        pattern = pattern or "dashboard:*"
-        return self.cache.delete_pattern(pattern)
 
     def execute_query(self, sql: str, params: Dict[str, Any] = None) -> pd.DataFrame:
         try:
@@ -116,21 +107,21 @@ class DatabaseService:
             )
         where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-        sql_count = f"SELECT COUNT(*) as cnt, SUM(total_amount) as rev, AVG(fare_amount) as avg_f FROM lakehouse.taxi_prod t {where_clause}"
-        sql_zones = f"SELECT COUNT(DISTINCT pulocationid) as active_zones FROM lakehouse.taxi_prod t {where_clause}"
+        sql_count = f"SELECT COUNT(*) as cnt, SUM(total_amount) as rev, AVG(fare_amount) as avg_f FROM lakehouse.taxi_prod  {where_clause}"
+        sql_zones = f"SELECT COUNT(DISTINCT pulocationid) as active_zones FROM lakehouse.taxi_prod  {where_clause}"
         sql_top = f"""
             SELECT 
-                IF(z.Zone = '' OR z.Zone IS NULL, 'Zone ' || toString(t.pulocationid), z.Zone) as zone_name,
+                CASE WHEN z.Zone IS NULL OR z.Zone = '' THEN concat('Zone ', toString(t.pulocationid)) ELSE z.Zone END as zone_name,
                 COUNT(*) as trips,
                 SUM(t.total_amount) as revenue
-            FROM lakehouse.taxi_prod t 
-            LEFT JOIN lakehouse.taxi_zones z ON t.pulocationid = z.LocationID
+            FROM (SELECT * FROM lakehouse.taxi_prod) t 
+            LEFT JOIN (SELECT * FROM lakehouse.taxi_zones) z ON t.pulocationid = z.LocationID
             {where_clause} 
             GROUP BY t.pulocationid, z.Zone 
             ORDER BY trips DESC 
             LIMIT 5
         """
-        sql_weather = "SELECT temperature, humidity, precipitation FROM lakehouse.nyc_weather WHERE time <= now() ORDER BY time DESC LIMIT 1"
+        sql_weather = "SELECT temperature, humidity, precipitation FROM lakehouse.nyc_weather  WHERE time <= now() ORDER BY time DESC LIMIT 1"
 
         try:
             count_df = self.execute_query(sql_count)
@@ -213,7 +204,7 @@ class DatabaseService:
                 fare_amount,
                 tip_amount,
                 total_amount
-            FROM lakehouse.taxi_prod
+            FROM lakehouse.taxi_prod 
             WHERE tpep_pickup_datetime >= now() - INTERVAL :hours_back HOUR
             ORDER BY tpep_pickup_datetime DESC
             LIMIT :limit
@@ -247,14 +238,13 @@ class DatabaseService:
 
         where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-        # ClickHouse requires numeric LIMIT; use very large number if no limit specified
         limit_clause = f"LIMIT {limit}" if limit else "LIMIT 10000"
 
         sql = f"""
             SELECT 
                 t.pulocationid as zone_id,
-                IF(z.Zone = '' OR z.Zone IS NULL, 'Zone ' || toString(t.pulocationid), z.Zone) as zone_name,
-                IF(z.Borough = '' OR z.Borough IS NULL, 'Unknown', z.Borough) as borough,
+                CASE WHEN z.Zone IS NULL OR z.Zone = '' THEN concat('Zone ', toString(t.pulocationid)) ELSE z.Zone END as zone_name,
+                CASE WHEN z.Borough IS NULL OR z.Borough = '' THEN 'Unknown' ELSE z.Borough END as borough,
                 COUNT(*) as pickups,
                 SUM(t.total_amount) as revenue,
                 AVG(t.fare_amount) as avg_fare,
@@ -328,7 +318,7 @@ class DatabaseService:
             SELECT 
                 formatDateTime({truncate_func}(tpep_pickup_datetime), '%Y-%m-%dT%H:%i:%SZ') as timestamps,
                 {sql_metric} as values
-            FROM lakehouse.taxi_prod
+            FROM lakehouse.taxi_prod 
             {where_clause}
             GROUP BY {truncate_func}(tpep_pickup_datetime)
             ORDER BY timestamps ASC
@@ -377,8 +367,8 @@ class DatabaseService:
                 COUNT(*) as trips,
                 round(AVG(t.fare_amount), 2) as avg_fare,
                 round(AVG(t.trip_distance), 2) as avg_distance
-            FROM lakehouse.taxi_prod t
-            LEFT JOIN lakehouse.nyc_weather w 
+            FROM lakehouse.taxi_prod  t
+            LEFT JOIN lakehouse.nyc_weather  w 
                 ON toStartOfHour(t.tpep_pickup_datetime) = toStartOfHour(w.time)
             {where_clause}
             GROUP BY toDate(tpep_pickup_datetime), 
@@ -406,7 +396,7 @@ class DatabaseService:
                     COUNT(*) as trips,
                     round(AVG(fare_amount), 2) as avg_fare,
                     round(AVG(trip_distance), 2) as avg_distance
-                FROM lakehouse.taxi_prod t
+                FROM lakehouse.taxi_prod  t
                 {where_clause.replace("t.", "")}
                 GROUP BY toDate(tpep_pickup_datetime), formatDateTime(tpep_pickup_datetime, '%H:00')
                 ORDER BY date DESC, hour DESC
@@ -418,17 +408,17 @@ class DatabaseService:
     def get_demand_predictions(self) -> List[Dict[str, Any]]:
         sql = """
             SELECT 
-                pulocationid as location_id,
-                IF(z.Zone = '' OR z.Zone IS NULL, 'Zone ' || toString(pulocationid), z.Zone) as zone_name,
+                t.pulocationid as location_id,
+                CASE WHEN z.Zone IS NULL OR z.Zone = '' THEN concat('Zone ', toString(t.pulocationid)) ELSE z.Zone END as zone_name,
                 now() + INTERVAL 1 HOUR as prediction_hour,
                 round(COUNT(*) * 1.1, 0) as predicted_demand,
                 round(0.7 + (rand() / 4294967296.0) * 0.25, 3) as confidence_score,
                 round(0.9 + (rand() / 4294967296.0) * 0.2, 2) as weather_impact_factor,
                 COUNT(*) as historical_avg
-            FROM lakehouse.taxi_prod
-            LEFT JOIN lakehouse.taxi_zones z ON pulocationid = z.LocationID
-            WHERE tpep_pickup_datetime >= now() - INTERVAL 7 DAY
-            GROUP BY pulocationid, z.Zone
+            FROM lakehouse.taxi_prod t
+            LEFT JOIN lakehouse.taxi_zones z ON t.pulocationid = z.LocationID
+            WHERE t.tpep_pickup_datetime >= now() - INTERVAL 7 DAY
+            GROUP BY t.pulocationid, z.Zone
             ORDER BY predicted_demand DESC
             LIMIT 20
         """
@@ -438,17 +428,17 @@ class DatabaseService:
     def get_realtime_activity(self) -> List[Dict[str, Any]]:
         sql = """
             SELECT 
-                pulocationid as zone_id,
-                IF(z.Zone = '' OR z.Zone IS NULL, 'Zone ' || toString(pulocationid), z.Zone) as zone_name,
+                t.pulocationid as zone_id,
+                CASE WHEN z.Zone IS NULL OR z.Zone = '' THEN concat('Zone ', toString(t.pulocationid)) ELSE z.Zone END as zone_name,
                 now() as timestamp,
                 round(COUNT(*) / 100.0 * 10, 1) as activity_score,
                 COUNT(*) as pickup_count,
-                round(SUM(total_amount), 2) as revenue_last_hour,
-                round(AVG(trip_distance) / 2.0, 1) as avg_wait_time
-            FROM lakehouse.taxi_prod
-            LEFT JOIN lakehouse.taxi_zones z ON pulocationid = z.LocationID
-            WHERE tpep_pickup_datetime >= now() - INTERVAL 1 HOUR
-            GROUP BY pulocationid, z.Zone
+                round(SUM(t.total_amount), 2) as revenue_last_hour,
+                round(AVG(t.trip_distance) / 2.0, 1) as avg_wait_time
+            FROM lakehouse.taxi_prod t
+            LEFT JOIN lakehouse.taxi_zones z ON t.pulocationid = z.LocationID
+            WHERE t.tpep_pickup_datetime >= now() - INTERVAL 1 HOUR
+            GROUP BY t.pulocationid, z.Zone
             ORDER BY pickup_count DESC
             LIMIT 20
         """
@@ -500,7 +490,6 @@ class PostgresHistoricalService:
                 maxconn=getattr(settings, "PG_POOL_MAX", 20),
                 **self.conn_params,
             )
-            self.cache = get_cache_service()
             logger.info(
                 f"PostgreSQL connection pool initialized "
                 f"(min={settings.PG_POOL_MIN}, max={settings.PG_POOL_MAX})"

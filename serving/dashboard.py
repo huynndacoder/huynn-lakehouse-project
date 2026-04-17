@@ -44,6 +44,14 @@ def fetch_data(endpoint: str, params: dict = None, mode: str = None) -> dict:
             url, headers=get_api_headers(), params=params, timeout=TIMEOUT_SEC
         )
         response.raise_for_status()
+        
+        data_source = response.headers.get("X-Data-Source", "")
+        if "Fallback" in data_source:
+            st.toast(f"⚠️ Viewing backup data from {data_source}", icon="⚠️")
+            #Uncomment this part if you really wanna know data source right on the dashboard, it will shows up like 3-4 instances of this message and idk how to fix that yet so up to you
+        #else:
+            #st.info(f"✅ Data routed from: {data_source}")
+
         payload = response.json()
         if payload.get("success"):
             return payload.get("data")
@@ -109,42 +117,15 @@ def create_mock_data(endpoint: str) -> dict:
     return None
 
 
-def create_mock_data(endpoint: str) -> dict:
-    if endpoint == "dashboard/stats":
-        return {
-            "total_trips_today": 2847,
-            "total_revenue_today": 47832.50,
-            "avg_fare_today": 16.80,
-            "top_zones": [{"zone_name": "JFK", "trips": 450, "revenue": 12500}],
-        }
-    elif endpoint == "analytics/time-series":
-        base = datetime.now()
-        return {
-            "timestamps": [(base - timedelta(hours=i)).isoformat() for i in range(24)][
-                ::-1
-            ],
-            "values": np.random.randint(500, 2000, 24).tolist(),
-        }
-    elif endpoint == "analytics/zones":
-        return [
-            {
-                "zone_name": f"Zone {i}",
-                "pickups": np.random.randint(100, 1000),
-                "revenue": np.random.uniform(2000, 15000),
-            }
-            for i in range(1, 11)
-        ]
-    return {}
 
-
-# --- UI Components ---
+# UI 
 def render_header(data_mode: str):
     status_color = "🟢" if data_mode == "Real-Time" else "🔵"
     latency = "< 30s" if data_mode == "Real-Time" else "< 5 min"
 
     st.title("🚕 NYC Taxi Lakehouse Dashboard")
     st.markdown(
-        f"**Powered by:** Kafka, Spark Structured Streaming, Iceberg, ClickHouse, and FastAPI"
+        f"**Powered by:** Kafka, Spark Structured Streaming, Iceberg, ClickHouse(Real-time), Apache Doris(Historical) and FastAPI"
     )
 
     cols = st.columns(4)
@@ -157,9 +138,7 @@ def render_header(data_mode: str):
     st.divider()
 
 
-def render_kpi_cards(
-    stats: dict, previous_stats: dict = None, mode: str = "Historical"
-):
+def render_kpi_cards(stats: dict, previous_stats: dict = None, mode: str = "Historical"):
     if not stats:
         st.warning("No data available for KPIs.")
         return
@@ -517,7 +496,6 @@ def render_sidebar(data_mode: str) -> dict:
             "End Date", default_end, help=f"Maximum range is {max_range_days} days"
         )
 
-        # Enforce max date range
         if start_date and end_date:
             days_diff = (end_date - start_date).days
             if days_diff > max_range_days:
@@ -536,7 +514,6 @@ def render_sidebar(data_mode: str) -> dict:
         default=["Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island"],
     )
 
-    # Debounced fare range slider - only updates on button click
     if "fare_range" not in st.session_state:
         st.session_state.fare_range = (10, 50)
 
@@ -571,7 +548,7 @@ def render_sidebar(data_mode: str) -> dict:
     }
 
 
-# --- Main Execution Flow ---
+#   Execution
 def main():
     if "refresh_counter" not in st.session_state:
         st.session_state.refresh_counter = 0
@@ -579,9 +556,9 @@ def main():
     data_mode = st.sidebar.radio(
         "📊 Data Mode",
         options=["Historical", "Real-Time"],
-        index=1,  # Default to Real-Time
+        index=1,  # Default Real-Time
         horizontal=True,
-        help="Historical: Use date filters. Real-Time: Latest hour, auto-refresh.",
+        help="Historical: Use date filters (Testing from 1-30/1/2025). Real-Time: Latest hour, auto-refresh.",
     )
 
     render_header(data_mode)
@@ -606,7 +583,7 @@ def main():
             default_end = datetime.now().strftime("%Y-%m-%d")
             date_params = {"start_date": default_start, "end_date": default_end}
 
-        # Zone params include boroughs filter (no limit - show all zones for analysis)
+        # Zone params include boroughs filter (how all zones for analysis)
         zone_params = {**date_params}
         if boroughs:
             zone_params["boroughs"] = ",".join(boroughs)
@@ -620,11 +597,11 @@ def main():
         ts_title = "Trip Volume"
 
     else:
-        # Real-time mode: today's data using date range (faster than hours_back with Iceberg)
+        # Real-time mode: today's data using date range 
         today = datetime.now(TIMEZONE_OFFSET).strftime("%Y-%m-%d")
         stats_params = {"start_date": today, "end_date": today}
 
-        # Zone params include boroughs filter (no limit - show all zones for analysis)
+        # Zone params include boroughs filter (show all zones for analysis)
         zone_params = {"start_date": today, "end_date": today}
         if boroughs:
             zone_params["boroughs"] = ",".join(boroughs)

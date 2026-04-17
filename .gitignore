@@ -9,6 +9,7 @@ __pycache__/
 dist/
 build/
 .eggs/
+*.bak
 
 # Virtual environments
 .venv/
@@ -65,3 +66,5 @@ airflow.db
 tmp/
 temp/
 *.tmp
+
+!dummy_aws_credentials

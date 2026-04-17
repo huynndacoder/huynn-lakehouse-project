@@ -55,12 +55,17 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 3G
 
   zookeeper:
     image: confluentinc/cp-zookeeper:5.5.3
     container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+      KAFKA_HEAP_OPTS: -Xmx512M -Xms256M
     healthcheck:
       test: ["CMD-SHELL", "echo stat | nc localhost 2181 || exit 1"]
       interval: 10s
@@ -82,6 +87,7 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_JMX_PORT: 9991
+      KAFKA_HEAP_OPTS: -Xmx768M -Xms512M
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
       interval: 10s
@@ -101,6 +107,7 @@ services:
       SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: zookeeper:2181
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_LISTENERS: http://schema-registry:8081
+      KAFKA_HEAP_OPTS: -Xmx256M -Xms256M
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8081/subjects || exit 1"]
       interval: 10s
@@ -127,8 +134,9 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      HEAP_OPTS: -Xmx512M -Xms256M
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8083/ || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8083/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -146,6 +154,7 @@ services:
       - "8090:8080"
     volumes:
       - ./spark_jobs:/spark_jobs
+      - ./data:/data
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
       interval: 10s
@@ -160,12 +169,21 @@ services:
     depends_on:
       spark-master:
         condition: service_healthy
+    environment:
+      SPARK_WORKER_CORES: 4      #Change these values based on your machine's resources, mine is limited
+      SPARK_WORKER_MEMORY: 4G    
+      SPARK_EXECUTOR_MEMORY: 1G
     command: >
       /opt/spark/bin/spark-class
       org.apache.spark.deploy.worker.Worker
       spark://spark-master:7077
     volumes:
       - ./spark_jobs:/spark_jobs
+      - ./data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 4G     
 
   minio:
     image: minio/minio
@@ -178,7 +196,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - ./minio_data:/data
+      - minio_data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -186,34 +204,110 @@ services:
       retries: 5
       start_period: 10s
 
-  redis:
-    image: redis:7-alpine
-    container_name: redis
+  doris-fe:
+    image: apache/doris:fe-2.1.8.1
+    container_name: doris-fe
+    hostname: doris-fe
     ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  trino:
-    image: trinodb/trino:435
-    container_name: trino
-    depends_on:
-      minio:
-        condition: service_healthy
-    ports:
-      - "8085:8080"
+      - "8030:8030"
+      - "9030:9030"
+    environment:
+      JAVA_OPTS: -Xmx4g -Xms4g -Daws.accessKeyId=admin -Daws.secretKey=admin12345
+      FE_SERVERS: "fe1:172.19.0.10:9010"
+      FE_ID: 1
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: datalake
+    networks:
+      default:
+        ipv4_address: 172.19.0.10
     volumes:
-      - ./trino/etc:/etc/trino
+      - doris-fe-meta:/opt/apache-doris/fe/doris-meta
+      - doris-fe-storage:/opt/apache-doris/fe/storage
+      - ./dummy_aws_credentials:/root/.aws/credentials:ro
+    command:
+      - /bin/bash
+      - -c
+      - |
+        # 1. Start the Frontend daemon
+        /opt/apache-doris/fe/bin/start_fe.sh --daemon
+        
+        # 2. Wait for MySQL interface to open
+        echo "Waiting for Doris FE MySQL interface to open..."
+        while ! mysql -h 127.0.0.1 -P 9030 -u root -e "SELECT 1" >/dev/null 2>&1; do
+          sleep 3
+        done
+
+        # 3. Wait for Master election
+        echo "Port is open! Waiting for FE to elect a Master node..."
+        while ! mysql -h 127.0.0.1 -P 9030 -u root -e "SHOW FRONTENDS;" 2>/dev/null | grep -q "true"; do
+          sleep 3
+        done
+        
+        echo "Master elected! Setting up Doris..."
+        
+        # Command 1: Try to add backend, but don't crash if it already exists
+        mysql -h 127.0.0.1 -P 9030 -u root -e "ALTER SYSTEM ADD BACKEND '172.19.0.17:9050';" || true
+        
+        # Command 2: Create the catalog
+        mysql -h 127.0.0.1 -P 9030 -u root -e "
+        CREATE CATALOG IF NOT EXISTS iceberg_hadoop PROPERTIES (
+          'type' = 'iceberg',
+          'iceberg.catalog.type' = 'hadoop',
+          'warehouse' = 's3a://datalake/warehouse/',
+          's3.endpoint' = 'http://minio:9000',
+          's3.access_key' = 'admin',
+          's3.secret_key' = 'admin12345',
+          's3.region' = 'us-east-1',
+          'use_path_style' = 'true',
+          'core.site.fs.s3a.endpoint' = 'http://minio:9000',
+          'core.site.fs.s3a.access.key' = 'admin',
+          'core.site.fs.s3a.secret.key' = 'admin12345',
+          'core.site.fs.s3a.path.style.access' = 'true',
+          'core.site.fs.s3a.impl' = 'org.apache.hadoop.fs.s3a.S3AFileSystem',
+          'core.site.fs.s3a.connection.ssl.enabled' = 'false',
+          'core.site.fs.s3a.signature.version' = 'S3V4'
+        );"
+        
+        echo "Catalog configuration applied successfully. Tailing FE logs..."
+        tail -f /opt/apache-doris/fe/log/fe.out
+    # -----------------------------
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/info || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      test: ["CMD", "curl", "-f", "http://localhost:8030/api/bootstrap"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+
+  doris-be:
+    image: apache/doris:be-2.1.8.1
+    container_name: doris-be
+    hostname: doris-be
+    ports:
+      - "9010:9010"
+      - "8040:8040"
+      - "8060:8060"
+      - "9050:9050"
+    environment:
+      FE_SERVERS: "fe1:172.19.0.10:9010"
+      BE_ADDR: 172.19.0.17:9050
+      BE_CONF_mem_limit: 2G
+    networks:
+      default:
+        ipv4_address: 172.19.0.17
+    volumes:
+      - doris-be-storage:/opt/apache-doris/be/storage
+      - ./dummy_aws_credentials:/root/.aws/credentials:ro
+    depends_on:
+      doris-fe:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
 
   taxi-simulator:
     image: python:3.11-slim
@@ -239,7 +333,7 @@ services:
     restart: unless-stopped
 
   analytics-api:
-    build: 
+    build:
       context: ./serving
       dockerfile: Dockerfile
     container_name: analytics-api
@@ -248,13 +342,15 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     ports:
       - "8001:8000" 
     environment:
       ENVIRONMENT: production
       API_KEY: huynz-super-secret-key-2026
+      DORIS_HOST: doris-fe
+      DORIS_PORT: 9030
+      DORIS_USER: root
+      DORIS_PASSWORD: ""
       CH_HOST: clickhouse
       CH_PORT: 8123
       CH_USER: admin
@@ -272,9 +368,6 @@ services:
       POSTGRES_PASSWORD: admin
       PG_POOL_MIN: 2
       PG_POOL_MAX: 20
-      REDIS_URL: redis://redis:6379
-      REDIS_CACHE_ENABLED: "true"
-      REDIS_CACHE_TTL: 300
     command: >
       python -m uvicorn api:app
       --host 0.0.0.0
@@ -315,17 +408,12 @@ services:
     depends_on:
       - postgres
       - clickhouse
+    # the port mapped but nothing will answer on 8081 since I intentionally turned the Web UI off for faster startup
     ports:
       - "8081:8080"
     environment:
       AIRFLOW__CORE__EXECUTOR: SequentialExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: admin
-      _AIRFLOW_WWW_USER_FIRSTNAME: admin
-      _AIRFLOW_WWW_USER_LASTNAME: admin
-      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
-      _AIRFLOW_WWW_USER_ROLE: Admin
     volumes:
       - ./dags:/opt/airflow/dags
       - ./data:/opt/airflow/data
@@ -333,14 +421,22 @@ services:
     command: >
       bash -c "
       pip install -r /requirements.txt &&
-      airflow standalone
+      airflow db migrate &&
+      airflow scheduler
       "
 
 volumes:
   clickhouse_data:
   postgres_data:
+  minio_data:
+  doris-fe-meta:
+  doris-fe-storage:
+  doris-be-storage:
 
 networks:
   default:
     name: huynz_net
-    external: false
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16

@@ -1,12 +1,11 @@
 import logging
 from contextlib import asynccontextmanager
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Security, status, Query
+from fastapi import FastAPI, Depends, HTTPException, Security, status, Query, Response
 from fastapi.security.api_key import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-# --- LEGO BRICK IMPORTS (To be built next) ---
 from config import settings
 from models import APIResponse
 from database import (
@@ -15,8 +14,9 @@ from database import (
     PostgresHistoricalService,
     get_historical_service,
 )
+from doris_service import DorisService, get_doris_service
 
-# --- Setup & Security ---
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
@@ -36,16 +36,16 @@ async def verify_api_key(api_key: str = Security(api_key_header)):
     return api_key
 
 
-# --- Lifespan Context ---
+# Lifespan Context
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"🚀 Starting up {settings.APP_NAME}...")
-    # We will trigger the DB connection pool initialization here later
+    # will trigger the DB connection pool initialization here later
     yield
     logger.info(f"🛑 Shutting down {settings.APP_NAME}...")
 
 
-# --- App Initialization ---
+# App Init
 app = FastAPI(
     title=settings.APP_NAME,
     description="REST API serving real-time NYC Taxi data from ClickHouse",
@@ -59,9 +59,10 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Data-Source"],
 )
 
-# --- Endpoints ---
+# Endpoints
 
 
 @app.get("/health", response_model=APIResponse, tags=["System"])
@@ -108,6 +109,7 @@ async def pool_metrics(
 
 @app.get("/api/v1/dashboard/stats", response_model=APIResponse, tags=["Dashboard"])
 async def get_dashboard_stats(
+    response: Response,
     mode: str = Query("realtime", regex="^(realtime|historical)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
@@ -120,13 +122,43 @@ async def get_dashboard_stats(
 ):
     try:
         if mode == "historical":
-            data = historical.get_historical_stats(
-                start_date=start_date, end_date=end_date
-            )
+            try:
+                doris = get_doris_service()
+                data = doris.get_historical_stats(
+                    start_date=start_date, end_date=end_date
+                )
+                logger.info("Historical stats from Doris/Iceberg")
+                
+                response.headers["X-Data-Source"] = "Doris (Iceberg)"
+                
+                return APIResponse(
+                    success=True,
+                    message="Stats retrieved from Iceberg Gold via Doris",
+                    data=data,
+                )
+                
+            except Exception as doris_error:
+                logger.warning(
+                    f"Doris query failed, falling back to PostgreSQL: {doris_error}"
+                )
+                data = historical.get_historical_stats(
+                    start_date=start_date, end_date=end_date
+                )
+                
+                response.headers["X-Data-Source"] = "PostgreSQL (Fallback)"
+                
+                return APIResponse(
+                    success=True,
+                    message="Stats retrieved from PostgreSQL (Doris fallback)",
+                    data=data,
+                )
         else:
             data = db.get_dashboard_stats(
                 start_date=start_date, end_date=end_date, hours_back=hours_back
             )
+            
+            response.headers["X-Data-Source"] = "ClickHouse (Real-time)"
+            
         return APIResponse(success=True, message="Stats retrieved", data=data)
     except Exception as e:
         logger.error(f"Dashboard stats error: {e}")
@@ -150,15 +182,12 @@ async def get_recent_trips(
 
 @app.get("/api/v1/analytics/zones", response_model=APIResponse, tags=["Analytics"])
 async def get_zone_analytics(
+    response: Response,
     mode: str = Query("realtime", regex="^(realtime|historical)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    hours_back: Optional[int] = Query(
-        None, description="Hours of data (for real-time)"
-    ),
-    limit: Optional[int] = Query(
-        None, ge=1, le=500, description="Max zones to return (default: all)"
-    ),
+    hours_back: Optional[int] = Query(None, description="Hours of data (for real-time)"),
+    limit: Optional[int] = Query(None, ge=1, le=500, description="Max zones to return"),
     boroughs: Optional[str] = Query(None, description="Comma-separated borough names"),
     api_key: str = Depends(verify_api_key),
     db: DatabaseService = Depends(get_db_service),
@@ -167,14 +196,29 @@ async def get_zone_analytics(
     try:
         borough_list = boroughs.split(",") if boroughs else None
         if mode == "historical":
-            data = historical.get_historical_zone_performance(
-                start_date, end_date, limit, borough_list
-            )
+            try:
+                doris = get_doris_service()
+                data = doris.get_historical_zone_performance(
+                    start_date=start_date, end_date=end_date, boroughs=borough_list, limit=limit
+                )
+                logger.info("✅ Zone analytics served by Doris (Iceberg)")
+                msg = "Zone analytics retrieved from Doris"
+                response.headers["X-Data-Source"] = "Doris (Iceberg)"
+            except Exception as e:
+                logger.warning(f"⚠️ Doris zone query failed, falling back to PostgreSQL: {e}")
+                data = historical.get_historical_zone_performance(
+                    start_date, end_date, limit, borough_list
+                )
+                msg = "Zone analytics retrieved from PostgreSQL (Fallback)"
+                response.headers["X-Data-Source"] = "PostgreSQL (Fallback)"
         else:
             data = db.get_zone_performance(
                 start_date, end_date, limit, hours_back, borough_list
             )
-        return APIResponse(success=True, message="Zone analytics retrieved", data=data)
+            msg = "Zone analytics retrieved from ClickHouse"
+            response.headers["X-Data-Source"] = "ClickHouse (Real-time)"
+            
+        return APIResponse(success=True, message=msg, data=data)
     except Exception as e:
         logger.error(f"Zone analytics error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -205,40 +249,46 @@ async def get_weather_impact(
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@app.get(
-    "/api/v1/analytics/time-series", response_model=APIResponse, tags=["Analytics"]
-)
+@app.get("/api/v1/analytics/time-series", response_model=APIResponse, tags=["Analytics"])
 async def get_time_series(
+    response: Response,
     mode: str = Query("realtime", regex="^(realtime|historical)$"),
     metric: str = Query("trip_count", regex="^(trip_count|revenue|avg_fare)$"),
     interval: str = Query("hour", regex="^(hour|day|week)$"),
     start_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
     end_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-    hours_back: Optional[int] = Query(
-        None, description="Filter last N hours (overrides dates)"
-    ),
+    hours_back: Optional[int] = Query(None, description="Filter last N hours (overrides dates)"),
     api_key: str = Depends(verify_api_key),
     db: DatabaseService = Depends(get_db_service),
     historical: PostgresHistoricalService = Depends(get_historical_service),
 ):
     try:
         if mode == "historical":
-            data = historical.get_historical_time_series(
-                metric,
-                interval,
-                start_date=start_date,
-                end_date=end_date,
-            )
+            try:
+                doris = get_doris_service()
+                data = doris.get_historical_time_series(
+                    metric=metric, interval=interval, start_date=start_date, end_date=end_date
+                )
+                logger.info("✅ Time series served by Doris (Iceberg)")
+                msg = f"Time series for {metric} from Doris"
+                response.headers["X-Data-Source"] = "Doris (Iceberg)"
+            except Exception as e:
+                logger.warning(f"⚠️ Doris time-series query failed, falling back to PostgreSQL: {e}")
+                data = historical.get_historical_time_series(
+                    metric, interval, start_date=start_date, end_date=end_date
+                )
+                msg = f"Time series for {metric} from PostgreSQL (Fallback)"
+                response.headers["X-Data-Source"] = "PostgreSQL (Fallback)"
         else:
             data = db.get_time_series(
-                metric,
-                interval,
-                start_date=start_date,
-                end_date=end_date,
-                hours_back=hours_back,
+                metric, interval, start_date=start_date, end_date=end_date, hours_back=hours_back
             )
-        return APIResponse(success=True, message=f"Time series for {metric}", data=data)
+            msg = f"Time series for {metric} from ClickHouse"
+            response.headers["X-Data-Source"] = "ClickHouse (Real-time)"
+            
+        return APIResponse(success=True, message=msg, data=data)
     except Exception as e:
+        logger.error(f"Time series error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

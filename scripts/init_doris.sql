@@ -1,0 +1,27 @@
+-- Apache Doris Iceberg Catalog Configuration
+-- This catalog connects to Iceberg tables created by Spark using Hadoop catalog
+-- Note: The docker-compose.yml creates this catalog automatically on FE startup
+
+-- To use this catalog:
+--   SWITCH iceberg_hadoop;
+--   USE lakehouse;
+--   SELECT * FROM silver_taxi_trips LIMIT 10;
+
+-- If you need to recreate the catalog manually, use these properties:
+-- CREATE CATALOG IF NOT EXISTS iceberg_hadoop PROPERTIES (
+--     'type' = 'iceberg',
+--     'iceberg.catalog.type' = 'hadoop',
+--     'warehouse' = 's3a://datalake/warehouse/',
+--     's3.endpoint' = 'http://minio:9000',
+--     's3.access_key' = 'admin',
+--     's3.secret_key' = 'admin12345',
+--     's3.region' = 'us-east-1',
+--     'use_path_style' = 'true',
+--     'core.site.fs.s3a.endpoint' = 'http://minio:9000',
+--     'core.site.fs.s3a.access.key' = 'admin',
+--     'core.site.fs.s3a.secret.key' = 'admin12345',
+--     'core.site.fs.s3a.path.style.access' = 'true',
+--     'core.site.fs.s3a.impl' = 'org.apache.hadoop.fs.s3a.S3AFileSystem',
+--     'core.site.fs.s3a.connection.ssl.enabled' = 'false',
+--     'core.site.fs.s3a.signature.version' = 'S3V4'
+-- );

@@ -9,6 +9,7 @@ CREATE DATABASE IF NOT EXISTS lakehouse;
 -- =============================================================================
 
 -- Taxi trips - real-time storage from Kafka
+-- Using ReplacingMergeTree for idempotent CDC writes
 CREATE TABLE IF NOT EXISTS lakehouse.taxi_prod
 (
     vendorid Int32,
@@ -33,12 +34,13 @@ CREATE TABLE IF NOT EXISTS lakehouse.taxi_prod
     cbd_congestion_fee Float32,
     _source_time DateTime DEFAULT now()
 )
-ENGINE = MergeTree()
+ENGINE = ReplacingMergeTree(_source_time)
 PARTITION BY toYYYYMM(tpep_pickup_datetime)
-ORDER BY (tpep_pickup_datetime, pulocationid)
+ORDER BY (tpep_pickup_datetime, pulocationid, vendorid)
 TTL tpep_pickup_datetime + INTERVAL 365 DAY;
 
 -- Weather data - real-time storage from Kafka
+-- Using ReplacingMergeTree for idempotent CDC writes
 CREATE TABLE IF NOT EXISTS lakehouse.nyc_weather
 (
     time DateTime,
@@ -48,7 +50,7 @@ CREATE TABLE IF NOT EXISTS lakehouse.nyc_weather
     windspeed Float32,
     _source_time DateTime DEFAULT now()
 )
-ENGINE = MergeTree()
+ENGINE = ReplacingMergeTree(_source_time)
 PARTITION BY toYYYYMM(time)
 ORDER BY time
 TTL time + INTERVAL 365 DAY;
