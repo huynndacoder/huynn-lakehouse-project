@@ -260,19 +260,6 @@ docker exec minio mc ls local/datalake/warehouse/lakehouse/
 docker exec postgres psql -U admin -d weather -c "UPDATE iceberg_tables SET table_namespace = 'lakehouse' WHERE table_namespace = '';"
 ```
 
-### Full Reset
-
-```bash
-# Stop everything and remove all data
-./huynn.sh down-v
-
-# Or manually:
-docker compose down -v
-
-# Then start fresh:
-./huynn.sh quickstart
-```
-
 ## Project Structure
 
 ```
