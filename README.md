@@ -47,11 +47,11 @@ A production-ready, tri-path analytics pipeline for real-time NYC Taxi data with
 │         │          │                            │                                │
 │         ▼          ▼                            ▼                                │
 │  ┌──────────────────────────┐   ┌──────────────────────────┐                     │
-│  │  ClickHouse Kafka Engine │   │     Apache Doris 2.1      │                     │
+│  │  ClickHouse Kafka Engine │   │     Apache Doris 2.1     │                     │
 │  │    (Real-time Path)      │   │   (SQL Query Engine)     │                     │
-│  │   < 1s latency           │   │   ├─ Hadoop Catalog     │                     │
-│  └───────────┬──────────────┘   │   ├─ Iceberg Connector  │                     │
-│              │                  │   └─ MySQL Protocol     │                     │
+│  │   < 1s latency           │   │   ├─ Hadoop Catalog      │                     │
+│  └───────────┬──────────────┘   │   ├─ Iceberg Connector   │                     │
+│              │                  │   └─ MySQL Protocol      │                     │
 │              │                  └───────────┬──────────────┘                     │
 │              └──────────────┬───────────────┘                                    │
 │                             │                                                    │
@@ -59,7 +59,7 @@ A production-ready, tri-path analytics pipeline for real-time NYC Taxi data with
 │  ┌─────────────────────────────────────────────────────────────────────┐         │
 │  │                        FastAPI (REST API)                           │         │
 │  │        ├─ Real-time mode: ClickHouse queries (sub-second)           │         │
-│  │        ├─ Historical mode: Doris → Iceberg Gold (50-200ms)           │         │
+│  │        ├─ Historical mode: Doris → Iceberg Gold (50-200ms)          │         │
 │  │        └─ Fallback: PostgreSQL direct (1-5s)                        │         │
 │  │        Connection pooling: PostgreSQL (2-20), ClickHouse (20)       │         │
 │  └─────────────────────────────┬───────────────────────────────────────┘         │
@@ -287,6 +287,7 @@ Huynz/
 ├── init_postgres.sql            # PostgreSQL schema (auto-loaded): includes taxi_zones
 ├── init_clickhouse.sql          # ClickHouse schema (auto-loaded)
 ├── setup_kafka_ingestion.sql    # ClickHouse Kafka engine tables (run via pipeline-init)
+├── dummy_aws_credentials        # I keep this to make sure Iceberg/Doris Catalog is stable
 │
 │
 ├── spark/                       # Spark custom image
