@@ -19,55 +19,55 @@ A production-ready, tri-path analytics pipeline for real-time NYC Taxi data with
 │  ┌───────────────────────────────────────────────────────────────────┐           │
 │  │                      PostgreSQL (Source DB)                       │           │
 │  │   Tables: yellow_taxi_trips, nyc_weather_hourly, taxi_zones       │           │
-│  │   + MinIO: Iceberg metadata (JSON files)                          │           │
 │  └─────────────────────────────┬─────────────────────────────────────┘           │
 │                                │                                                 │
-│                  ┌─────────────┴─────────────┐                                   │
-│                  │                           │                                   │
-│                  ▼                           ▼                                   │
+│                                ▼                                                 │
+│                  ┌───────────────────────────┐                                   │
+│                  │       Debezium CDC        │                                   │
+│                  └─────────────┬─────────────┘                                   │
+│                                │                                                 │
+│                                ▼                                                 │
+│                  ┌───────────────────────────┐                                   │
+│                  │       Apache Kafka        │                                   │
+│                  │     Topics: CDC events    │                                   │
+│                  └──────┬─────────────┬──────┘                                   │
+│                         │             │                                          │
+│          ┌──────────────┘             └──────────────┐                           │
+│          ▼                                           ▼                           │
 │  ┌──────────────────────────┐   ┌───────────────────────────────────────┐        │
-│  │     Debezium CDC         │   │          Spark Structured Stream      │        │
-│  │   (Change Data Capture)  │   │    ┌──────────────────────────┐       │        │
-│  └─────────────┬────────────┘   │    │ Hadoop Catalog (MinIO)   │       │        │
-│                │                │    │  - iceberg_tables        │       │        │
-│                ▼                │    │  - table metadata        │       │        │
-│  ┌──────────────────────────┐   │    └──────────────────────────┘       │        │
-│  │      Apache Kafka        │   └─────────────────┬─────────────────────┘        │
-│  │  Topics: CDC events      │                     │                              │
-│  └──────┬──────────┬────────┘                     ▼                              │
-│         │          │                ┌──────────────────────────┐                 │
-│         │          │                │    MinIO Iceberg Tables  │                 │
-│         │          │                │    ┌────────────────┐    │                 │
-│         │          │                │    │ taxi_zones     │    │                 │
-│         │          │                │    │ silver_taxi_trips   │                 │
-│         │          │                │    │ nyc_weather    |    │                 │
-│         │          │                │    │ gold_*(aggregations)│                 │
-│         │          │                │    └────────────────┘    │                 │
-│         │          │                └───────────┬──────────────┘                 │
-│         │          │                            │                                │
-│         ▼          ▼                            ▼                                │
-│  ┌──────────────────────────┐   ┌──────────────────────────┐                     │
-│  │  ClickHouse Kafka Engine │   │     Apache Doris 2.1     │                     │
-│  │    (Real-time Path)      │   │   (SQL Query Engine)     │                     │
-│  │   < 1s latency           │   │   ├─ Hadoop Catalog      │                     │
-│  └───────────┬──────────────┘   │   ├─ Iceberg Connector   │                     │
-│              │                  │   └─ MySQL Protocol      │                     │
-│              │                  └───────────┬──────────────┘                     │
-│              └──────────────┬───────────────┘                                    │
-│                             │                                                    │
-│                             ▼                                                    │
+│  │  ClickHouse Kafka Engine │   │       Spark Structured Streaming      │        │
+│  │    (Real-time Path)      │   │     (Topology-Aware Dispatcher)       │        │
+│  │   < 1s latency           │   └─────────────────┬─────────────────────┘        │
+│  └───────────┬──────────────┘                     │                              │
+│              │                                    ▼                              │
+│              │                      ┌──────────────────────────┐                 │
+│              │                      │    MinIO Iceberg Tables  │                 │
+│              │                      │    ├─ Bronze (Raw CDC)   │                 │
+│              │                      │    ├─ Silver (Cleaned)   │                 │
+│              │                      │    └─ Gold (Aggregated)  │                 │
+│              │                      └───────────┬──────────────┘                 │
+│              │                                  │                                │
+│              ▼                                  ▼                                │
+│  ┌──────────────────────────┐       ┌──────────────────────────┐                 │
+│  │    Real-Time Dashboard   │       │     Apache Doris 2.1     │                 │
+│  │    (Direct Queries)      │       │   (Historical Engine)    │                 │
+│  └───────────┬──────────────┘       └───────────┬──────────────┘                 │
+│              │                                  │                                │
+│              └────────────────┬─────────────────┘                                │
+│                               ▼                                                  │
 │  ┌─────────────────────────────────────────────────────────────────────┐         │
 │  │                        FastAPI (REST API)                           │         │
-│  │        ├─ Real-time mode: ClickHouse queries (sub-second)           │         │
-│  │        ├─ Historical mode: Doris → Iceberg Gold (50-200ms)          │         │
-│  │        └─ Fallback: PostgreSQL direct (1-5s)                        │         │
-│  │        Connection pooling: PostgreSQL (2-20), ClickHouse (20)       │         │
+│  │    ├─ Real-time mode: ClickHouse queries (sub-second)               │         │
+│  │    ├─ Historical mode: Doris → Iceberg Gold (50-200ms)              │         │
+│  │    ├─ Fallback: PostgreSQL direct (1-5s)                            │         │
+│  │    └─ Observability: Injects `X-Data-Source` HTTP headers           │         │
 │  └─────────────────────────────┬───────────────────────────────────────┘         │
 │                                │                                                 │
 │                                ▼                                                 │
 │  ┌─────────────────────────────────────────────────────────────────────┐         │
 │  │                      Streamlit Dashboard                            │         │
-│  │          Toggle between Real-Time and Historical modes              │         │
+│  │    ├─ Toggle between Real-Time and Historical modes                 │         │
+│  │    └─ Intercepts API headers to display degrade/fallback warnings   │         │
 │  └─────────────────────────────────────────────────────────────────────┘         │
 └──────────────────────────────────────────────────────────────────────────────────┘
 ```
