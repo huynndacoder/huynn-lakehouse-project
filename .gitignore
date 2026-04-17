@@ -67,4 +67,6 @@ tmp/
 temp/
 *.tmp
 
+archive/
+
 !dummy_aws_credentials
