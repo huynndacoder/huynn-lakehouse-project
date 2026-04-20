@@ -120,7 +120,7 @@ cd ..
 docker compose up -d
 ```
 
-### 2. Initialising all necessary steps (Seeding taxi_zones, Register Debezium, Link Kafka to ClickHouse, Create Iceberg Catalog, Triggering Headless Airflow Ingestion)
+### 2. Initialising all necessary steps (Seeding taxi_zones, Register Debezium, Link Kafka to ClickHouse, Create Iceberg Catalog, Trigger Headless Airflow Ingestion)
 
 ```bash
 ./huynn.sh pipeline:init
