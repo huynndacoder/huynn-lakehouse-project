@@ -1,7 +1,31 @@
 # NYC Taxi Real-Time Analytics Pipeline
 
 A production-ready, tri-path analytics pipeline for real-time NYC Taxi data with Change Data Capture (CDC), supporting instantaneous real-time queries via ClickHouse, historical analytics via Doris/Iceberg, and PostgreSQL fallback.
- 
+
+## Project Status, DataOps Direction, and Scalability Plan
+
+The current version proves the complete end-to-end lakehouse flow from CDC ingestion to analytics serving. The next stage focuses on making the project more scalable, maintainable, and production-oriented.
+
+Instead of adding more features immediately, the project is being refactored around clearer architectural seams:
+
+- reusable Spark session setup,
+- reusable CDC ingestion logic,
+- backend-specific analytics query adapters,
+- explicit Pydantic response models,
+- dashboard data adapters,
+- and tests for critical pipeline behavior.
+
+This follows a DataOps-oriented approach: the goal is not only to process data, but to make the data pipeline reliable, testable, observable, and safe to extend.
+
+## Future Work
+
+- Expand Airflow from headless initialization into a full orchestration and observability layer.
+- Add tests around Spark session creation, CDC parsing, query adapters, API models, and fallback behavior.
+- Refactor duplicated CDC and analytics query logic into reusable modules.
+- Improve dashboard/API separation through a dedicated dashboard data adapter.
+
+Future work includes expanding Airflow from a headless initialization helper into a full orchestration and observability layer, with DAG visibility, task monitoring, retries, and easier pipeline debugging.
+
 ## Architecture Overview
 
 ### Tri-Path Architecture
@@ -356,6 +380,7 @@ CREATE CATALOG iceberg_hadoop PROPERTIES (
 | Historical stats | Doris → Iceberg Gold | 50-200ms |
 | Historical stats | PostgreSQL (fallback) | 1-5s |
 | Weather impact | PostgreSQL + Iceberg | 2-4s |
+
 
 ## License
 
